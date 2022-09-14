@@ -329,6 +329,61 @@ function template_loop(tenv, initmaxj)
 	return itor
 end
 
+function use_tag(source, id, index)
+	for tags in string.gmatch(source.text, "{[^}]+}") do
+		local match = string.match(tags, "\\" .. id .. "([^\\}]+)")
+		if match ~= nil then
+			if index ~= nil then
+				local i = 1
+				for w in string.gmatch(match, "[^,%(%)]+") do
+					if i == index then
+						return tonumber(w) or w;
+					end
+					i = i + 1
+				end
+			else
+				return tonumber(match) or match;
+			end
+		end
+	end
+	return nil
+end
+
+function transform(t1, t2, step, tag, easing)
+	local ret, f, g = {}, nil, nil;
+	local delta_t = t2 - t1;
+	if delta_t <= 0 or step <= 0 then
+		aegisub.debug.out(3, "Invalid arguments from transformation: t1 = %s, t2 = %s, step = %s\n", t1, t2, step);
+		return "";
+	end
+	if easing ~= nil then
+		g = function(t)
+			return easing((t - t1) / delta_t, t, t1, t2);
+		end
+	else
+		g = function(t)
+			return (t - t1) / delta_t;
+		end;
+	end
+	f = function(t)
+		return tag(g(t), t, t1, t2);
+	end
+	local t, t_old, accel, g_old = t1, t1, 1.0, 1.0;
+	if t1 == 0 then
+		table.insert(ret, f(t1));
+	else
+		table.insert(ret, string.format("\\t(%d,%d,%s,%s)", t1, t1, 1, f(t1)));
+	end
+	while t < t2 do
+		t_old = t;
+		t = math.min(t + step, t2);
+		g_old = g(t_old);
+		accel = math.log((g((t + t_old) / 2) - g_old) / (g(t) - g_old), 0.5);
+		accel = math.floor(accel * 1000) / 1000;
+		table.insert(ret, string.format("\\t(%d,%d,%s,%s)", t_old, t, accel, f(t)));
+	end
+	return table.concat(ret);
+end
 
 -- Apply the templates
 function apply_templates(meta, styles, subs, templates)
@@ -511,6 +566,178 @@ function apply_templates(meta, styles, subs, templates)
 			return tenv.remember(name, value, decorator)
 		end
 		return value
+	end
+	-- condition and true_value or false_value
+	tenv.value_if = function(condition, true_value, false_value)
+		if condition then
+			return true_value
+		end
+		return false_value
+	end
+	-- load fx line as function
+	tenv.load_fx = function(effect)
+		local text = "";
+		for i, line in ipairs(subs) do
+			if line.class == "dialogue" and line.comment and line.effect:match("fx " .. effect) then
+				text = line.text;
+				break;
+			end
+		end
+		return function(extra)
+			local new_varctx;
+			if extra ~= nil then
+				new_varctx = {};
+				for k, v in pairs(extra) do
+					new_varctx[k] = v;
+				end
+				setmetatable(new_varctx, { __index = tenv.varctx });
+			else
+				new_varctx = tenv.varctx;
+			end
+			return run_text_template(text, tenv, new_varctx);
+		end
+	end
+	-- apply fx line
+	tenv.use_fx_cache = {};
+	tenv.use_fx = function(effect, extra)
+		local eff = tenv.use_fx_cache[effect];
+		if eff == nil then
+			eff = tenv.load_fx(effect);
+			tenv.use_fx_cache[effect] = eff;
+		end
+		return eff(extra);
+	end
+	-- extract tag data from source (line or syl) supported custom tags
+	tenv.use_tag = use_tag;
+	tenv.u = setmetatable({}, {
+		__index = function(tab, id)
+			local f = function(index)
+				return tenv.use_tag(tenv.line, id, index);
+			end
+			tab[id] = f;
+			return f;
+		end,
+		__call = function(tab, id, index)
+			return tenv.use_tag(tenv.line, id, index);
+		end
+	});
+	tenv.usyl = setmetatable({}, {
+		__index = function(tab, id)
+			local f = function(index)
+				return tenv.use_tag(tenv.syl, id, index);
+			end
+			tab[id] = f;
+			return f;
+		end,
+		__call = function(tab, id, index)
+			return tenv.use_tag(tenv.syl, id, index);
+		end
+	});
+	-- transform (ox, oy) to coordinate defined by (x, y, align, matrix)
+	tenv.locate_c = function(ox, oy, x, y, align, matrix)
+		local line, syl = tenv.line, tenv.syl;
+		x = x or tenv.use_tag(line, "pos", 1) or line.center;
+		y = y or tenv.use_tag(line, "pos", 2) or line.middle;
+		align = align or tenv.use_tag(line, "an") or line.styleref.align or 5;
+		local xoffset, yoffset;
+		if align == 1 or align == 4 or align == 7 then
+			xoffset = 0;
+		elseif align == 3 or align == 6 or align == 9 then
+			xoffset = -line.width;
+		else
+			xoffset = -line.width / 2;
+		end
+		if align == 1 or align == 2 or align == 3 then
+			yoffset = -line.height;
+		elseif align == 7 or align == 8 or align == 9 then
+			yoffset = 0;
+		else
+			yoffset = -line.height / 2;
+		end
+		if syl ~= nil then
+			xoffset = xoffset + syl.left;
+		end
+		if ox ~= nil then
+			xoffset = xoffset + ox - line.left;
+			if syl ~= nil then
+				xoffset = xoffset - syl.left;
+			end
+		else
+			if syl ~= nil then
+				xoffset = xoffset + syl.width / 2;
+			else
+				xoffset = xoffset + line.width / 2;
+			end
+		end
+		if oy ~= nil then
+			yoffset = yoffset + oy - line.top;
+		else
+			yoffset = yoffset + line.height / 2;
+		end
+		if matrix ~= nil then
+			local z, w = 0, 1;
+			xoffset = xoffset * matrix[1] + yoffset * matrix[5] + z * matrix[9] + w * matrix[13];
+			yoffset = xoffset * matrix[2] + yoffset * matrix[6] + z * matrix[10] + w * matrix[14];
+		end
+		x = x + xoffset;
+		y = y + yoffset;
+		return { x, y };
+	end
+	tenv.locate = function(ox, oy, x, y, align, matrix)
+		local ret = tenv.locate_c(ox, oy, x, y, align, matrix);
+		return string.format("%g,%g", ret[1], ret[2]);
+	end
+	tenv.locate_s = function(ox, oy, x, y, align, matrix)
+		local ret = tenv.locate_c(ox, oy, x, y, align, matrix);
+		return string.format("%g %g", ret[1], ret[2]);
+	end
+	-- variable define
+	tenv.varctx = nil;
+	tenv.varctx_base = {};
+	tenv.define = function(name, value)
+		tenv.varctx_base[name] = value;
+		return value;
+	end
+	-- interpolation
+	tenv.transfrom = transform;
+	tenv.t = tenv.transfrom;
+	-- debug out
+	tenv.log = function(...)
+		local args = { ... };
+		local argn = #args;
+		if argn <= 1 then
+			aegisub.debug.out(2, "%s", args[1]);
+		else
+			if type(args[1]) == "number" then
+				a
+			end
+		end
+	end;
+	-- import
+	tenv.import = function(name, alias)
+		if alias == nil then
+			alias = name;
+		end
+		tenv[alias] = require(name);
+	end
+	tenv.import_local = function(path, name)
+		local file = assert(io.open(aegisub.decode_path(path), "r"));
+		local code = file:read("*a");
+		file:close();
+		f, err = loadstring(code);
+		if err ~= nil then
+			aegisub.debug.out(2, "Error import local: %s\n\n", err);
+		else
+			setfenv(f, tenv);
+			local res, val = pcall(f)
+			if res then
+				if name ~= nil then
+					tenv[name] = val;
+				end
+			else
+				aegisub.debug.out(2, "Runtime error in local import: %s\n\n", val);
+			end
+		end
 	end
 
 	-- run all run-once code snippets
@@ -900,6 +1127,10 @@ function apply_line(meta, styles, subs, line, templates, tenv)
 	tenv.basechar = nil
 	tenv.syl = nil
 	tenv.basesyl = nil
+	tenv.varctx = varctx;
+	setmetatable(varctx, {
+		__index = tenv.varctx_base
+	})
 
 	-- Apply all line templates
 	aegisub.debug.out(5, "Running line templates\n")
