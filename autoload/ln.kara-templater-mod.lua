@@ -99,19 +99,15 @@ function parse_code(meta, styles, line, templates, mods)
 			table.insert(templates.syl, template)
 			inserted = true
 		elseif m == "furi" then
-			aegisub.debug.out(5, "Found per-syl code line: %s\n", line.text)
+			aegisub.debug.out(5, "Found per-furi code line: %s\n", line.text)
 			table.insert(templates.furi, template)
-			inserted = true
-        elseif m == "furi" then
-			aegisub.debug.out(5, "Found per-syl code line: %s\n", line.text)
-			table.insert(templates.furichar, template)
 			inserted = true
 		elseif m == "char" then
 			aegisub.debug.out(5, "Found per-char code line: %s\n", line.text)
 			table.insert(templates.char, template)
 			inserted = true
-        elseif m == "furichar" then
-			aegisub.debug.out(5, "Found per-char code line: %s\n", line.text)
+		elseif m == "furichar" then
+			aegisub.debug.out(5, "Found per-furichar code line: %s\n", line.text)
 			table.insert(templates.furichar, template)
 			inserted = true
 		elseif m == "multi" then
@@ -219,7 +215,7 @@ function parse_template(meta, styles, line, templates, mods)
 		elseif m == "furi" and not template.isline then
 			table.insert(templates.furi, template)
 			inserted = true
-        elseif m == "furichar" and not template.isline then
+		elseif m == "furichar" and not template.isline then
 			table.insert(templates.furichar, template)
 			inserted = true
 		elseif m == "char" and not template.isline then
@@ -348,7 +344,54 @@ function use_tag(source, id, index)
 	end
 	return nil
 end
-
+function locate(line, syl, ox, oy, x, y, align, matrix)
+	x = x or line.center;
+	y = y or line.middle;
+	align = align or line.styleref.align or 5;
+	local xoffset, yoffset;
+	if align == 1 or align == 4 or align == 7 then
+		xoffset = 0;
+	elseif align == 3 or align == 6 or align == 9 then
+		xoffset = -line.width;
+	else
+		xoffset = -line.width / 2;
+	end
+	if align == 1 or align == 2 or align == 3 then
+		yoffset = -line.height;
+	elseif align == 7 or align == 8 or align == 9 then
+		yoffset = 0;
+	else
+		yoffset = -line.height / 2;
+	end
+	if syl ~= nil then
+		xoffset = xoffset + syl.left;
+	end
+	if ox ~= nil then
+		xoffset = xoffset + ox - line.left;
+		if syl ~= nil then
+			xoffset = xoffset - syl.left;
+		end
+	else
+		if syl ~= nil then
+			xoffset = xoffset + syl.width / 2;
+		else
+			xoffset = xoffset + line.width / 2;
+		end
+	end
+	if oy ~= nil then
+		yoffset = yoffset + oy - line.top;
+	else
+		yoffset = yoffset + line.height / 2;
+	end
+	if matrix ~= nil then
+		local z, w = 0, 1;
+		xoffset = xoffset * matrix[1] + yoffset * matrix[5] + z * matrix[9] + w * matrix[13];
+		yoffset = xoffset * matrix[2] + yoffset * matrix[6] + z * matrix[10] + w * matrix[14];
+	end
+	x = x + xoffset;
+	y = y + yoffset;
+	return x, y;
+end
 function transform(t1, t2, step, tag, easing)
 	local ret, f, g = {}, nil, nil;
 	local delta_t = t2 - t1;
@@ -368,7 +411,7 @@ function transform(t1, t2, step, tag, easing)
 	f = function(t)
 		return tag(g(t), t, t1, t2);
 	end
-	local t, t_old, accel, g_old = t1, t1, 1.0, 1.0;
+	local t, t_old, ratio, accel, g_old = t1, t1, 0.5, 1.0, 1.0;
 	if t1 == 0 then
 		table.insert(ret, f(t1));
 	else
@@ -378,11 +421,109 @@ function transform(t1, t2, step, tag, easing)
 		t_old = t;
 		t = math.min(t + step, t2);
 		g_old = g(t_old);
-		accel = math.log((g((t + t_old) / 2) - g_old) / (g(t) - g_old), 0.5);
+		ratio = (g((t + t_old) / 2) - g_old) / (g(t) - g_old);
+		if ratio > 0.99999 then ratio = 0.99999 end
+		if ratio < 0.00001 then ratio = 0.00001 end
+		accel = math.log(ratio) / math.log(0.5);
 		accel = math.floor(accel * 1000) / 1000;
 		table.insert(ret, string.format("\\t(%d,%d,%s,%s)", t_old, t, accel, f(t)));
 	end
 	return table.concat(ret);
+end
+function makeloop(tenv, receiver, args)
+	local argn = #args;
+	local template = tenv.template;
+	local loop_data, loop_state;
+	if type(template.loop_data) == "table" then
+		loop_data = template.loop_data
+	else
+		loop_data = {
+			maxj = tenv.maxj,
+			vars = {}
+		};
+		template.loop_data = loop_data;
+	end
+	if type(receiver) == "string" then
+		loop_state = tenv[receiver];
+		if loop_state ~= nil then
+			if type(loop_state) ~= "table" then
+				loop_state = {};
+				aegisub.debug.out(2, "Trying to use a non-table as loop state receiver.\n");
+			end
+		else
+			loop_state = {};
+			tenv[receiver] = loop_state;
+		end
+	else
+		loop_state = {};
+	end
+	if loop_data.maxj ~= tenv.maxj then
+		aegisub.debug.out(2, "Do not use both makeloop(...) and loopctl/maxloop.\n");
+		tenv.maxj = loop_data.maxj;
+	end
+	for i = 2, argn, 2 do
+		local name, range = args[i - 1], args[i];
+		local data = loop_data.vars[name];
+		-- { j_divider, j_modder, factor, offset }
+		if data ~= nil then
+			loop_state[name] = math.floor((tenv.j - 1) / data[1]) % data[2] * data[3] + data[4];
+		else
+			if tenv.j == 1 then
+				if type(range) == "number" then
+					data = { tenv.maxj, range, 1, 1 };
+				elseif type(range) == "table" then
+					local rn = #range;
+					if rn == 1 then
+						data = { tenv.maxj, range[1], 1, 1 };
+					elseif rn == 2 then
+						data = { tenv.maxj, range[2] - range[1] + 1, 1, range[1] };
+					elseif rn == 3 then
+						data = { tenv.maxj, math.floor((range[2] - range[1]) / range[3]) + 1, range[3], range[1] };
+					end
+				end
+				if data ~= nil then
+					loop_data.vars[name] = data;
+					loop_state[name] = data[4];
+					tenv.maxj = tenv.maxj * data[2];
+					loop_data.maxj = tenv.maxj;
+				else
+					aegisub.debug.out(2, "Illegal loop variable range: %s\n", range);
+				end
+			else
+				aegisub.debug.out(2, "Undefined loop variable: %s\n", name);
+			end
+		end
+	end
+	if type(receiver) == "function" then
+		return receiver(loop_state);
+	end
+	return "";
+end
+function loopset(tenv, args)
+	local template = tenv.template;
+	local argn = #args;
+	local loop_data = template.loop_data;
+	if loop_data ~= nil then
+		for i = 2, argn, 2 do
+			local name, value = args[i - 1], args[i];
+			local data = loop_data.vars[name];
+			-- { j_divider, j_modder, factor, offset }
+			if data ~= nil then
+				local oldindex = math.floor((tenv.j - 1) / data[1]) % data[2];
+				local newindex = math.floor((value - data[4]) / data[3]);
+				if newindex < 0 then
+					newindex = 0;
+				elseif newindex >= data[2] then
+					newindex = data[2] - 1;
+				end
+				tenv.j = tenv.j + data[1] * (newindex - oldindex);
+			else
+				aegisub.debug.out(2, "Undefined loop variable: %s\n", name);
+			end
+		end
+	else
+		aegisub.debug.out(2, "Cannot modify an uninitialized loop.\n");
+	end
 end
 
 -- Apply the templates
@@ -451,7 +592,9 @@ function apply_templates(meta, styles, subs, templates)
 		return ""
 	end
 
+	---@deprecated
 	tenv.k_retime = function(mode, addstart, addend)
+		aegisub.debug.out(3, "k_retime is deprecated, please do not use\n");
 		local line, syl = tenv.line, tenv.syl
 		local newstart, newend = line.start_time, line.end_time
 		addstart = addstart or 0
@@ -607,6 +750,25 @@ function apply_templates(meta, styles, subs, templates)
 		end
 		return eff(extra);
 	end
+	-- text template
+	tenv.t = function(text, no_escape)
+		if not no_escape then
+			text = text:gsub("@", "$"):gsub("`", "!");
+		end
+		return function(extra)
+			local new_varctx;
+			if extra ~= nil then
+				new_varctx = {};
+				for k, v in pairs(extra) do
+					new_varctx[k] = v;
+				end
+				setmetatable(new_varctx, { __index = tenv.varctx });
+			else
+				new_varctx = tenv.varctx;
+			end
+			return run_text_template(text, tenv, new_varctx);
+		end
+	end
 	-- extract tag data from source (line or syl) supported custom tags
 	tenv.use_tag = use_tag;
 	tenv.u = setmetatable({}, {
@@ -624,93 +786,74 @@ function apply_templates(meta, styles, subs, templates)
 	tenv.usyl = setmetatable({}, {
 		__index = function(tab, id)
 			local f = function(index)
-				return tenv.use_tag(tenv.syl, id, index);
+				return tenv.use_tag(tenv.syll, id, index);
 			end
 			tab[id] = f;
 			return f;
 		end,
 		__call = function(tab, id, index)
-			return tenv.use_tag(tenv.syl, id, index);
+			return tenv.use_tag(tenv.syll, id, index);
 		end
 	});
 	-- transform (ox, oy) to coordinate defined by (x, y, align, matrix)
 	tenv.locate_c = function(ox, oy, x, y, align, matrix)
 		local line, syl = tenv.line, tenv.syl;
-		x = x or tenv.use_tag(line, "pos", 1) or line.center;
-		y = y or tenv.use_tag(line, "pos", 2) or line.middle;
-		align = align or tenv.use_tag(line, "an") or line.styleref.align or 5;
-		local xoffset, yoffset;
-		if align == 1 or align == 4 or align == 7 then
-			xoffset = 0;
-		elseif align == 3 or align == 6 or align == 9 then
-			xoffset = -line.width;
-		else
-			xoffset = -line.width / 2;
-		end
-		if align == 1 or align == 2 or align == 3 then
-			yoffset = -line.height;
-		elseif align == 7 or align == 8 or align == 9 then
-			yoffset = 0;
-		else
-			yoffset = -line.height / 2;
-		end
-		if syl ~= nil then
-			xoffset = xoffset + syl.left;
-		end
-		if ox ~= nil then
-			xoffset = xoffset + ox - line.left;
-			if syl ~= nil then
-				xoffset = xoffset - syl.left;
-			end
-		else
-			if syl ~= nil then
-				xoffset = xoffset + syl.width / 2;
-			else
-				xoffset = xoffset + line.width / 2;
-			end
-		end
-		if oy ~= nil then
-			yoffset = yoffset + oy - line.top;
-		else
-			yoffset = yoffset + line.height / 2;
-		end
-		if matrix ~= nil then
-			local z, w = 0, 1;
-			xoffset = xoffset * matrix[1] + yoffset * matrix[5] + z * matrix[9] + w * matrix[13];
-			yoffset = xoffset * matrix[2] + yoffset * matrix[6] + z * matrix[10] + w * matrix[14];
-		end
-		x = x + xoffset;
-		y = y + yoffset;
-		return { x, y };
+		return locate(
+			line, syl,
+			ox, oy,
+			x or tenv.use_tag(line, "pos", 1), y or tenv.use_tag(line, "pos", 2),
+			align or tenv.use_tag(line, "an"),
+			matrix
+		);
 	end
 	tenv.locate = function(ox, oy, x, y, align, matrix)
-		local ret = tenv.locate_c(ox, oy, x, y, align, matrix);
-		return string.format("%g,%g", ret[1], ret[2]);
+		local rx, ry = tenv.locate_c(ox, oy, x, y, align, matrix);
+		return string.format("%g,%g", rx, ry);
 	end
 	tenv.locate_s = function(ox, oy, x, y, align, matrix)
-		local ret = tenv.locate_c(ox, oy, x, y, align, matrix);
-		return string.format("%g %g", ret[1], ret[2]);
+		local rx, ry = tenv.locate_c(ox, oy, x, y, align, matrix);
+		return string.format("%g %g", rx, ry);
 	end
 	-- variable define
 	tenv.varctx = nil;
 	tenv.varctx_base = {};
-	tenv.define = function(name, value)
-		tenv.varctx_base[name] = value;
-		return value;
+	tenv.define = function(name, value, var_type)
+		if var_type == "template" then
+			tenv.varctx_base[name] = function(varctx)
+				return run_text_template(value, tenv, varctx);
+			end
+		elseif var_type == "computed" and type(value) == "function" then
+			tenv.varctx_base[name] = value;
+		else
+			tenv.varctx_base[name] = tostring(value);
+		end
 	end
 	-- interpolation
-	tenv.transfrom = transform;
-	tenv.t = tenv.transfrom;
+	tenv.transform = function(t1, t2, step, tag, easing)
+		local line = tenv.line;
+		local f_tag = tag;
+		t1 = t1 or 0;
+		t2 = t2 or line.duration;
+		step = step or (aegisub.ms_from_frame(101) - aegisub.ms_from_frame(1)) / 100;
+		if type(tag) == "string" then
+			local parsed = tenv.t(tag);
+			f_tag = function(p, t)
+				return parsed({ p = string.format("%f", p), t = t, tstart = t1, tend = t2 });
+			end
+		end
+		return transform(t1, t2, step, f_tag, easing);
+	end;
+	-- random
+	math.randomseed(0);
+	tenv.random = math.random;
 	-- debug out
 	tenv.log = function(...)
 		local args = { ... };
 		local argn = #args;
 		if argn <= 1 then
-			aegisub.debug.out(2, "%s", args[1]);
+			aegisub.log("%s", args[1]);
 		else
-			if type(args[1]) == "number" then
-				a
-			end
+			aegisub.log(table.unpack(args));
 		end
 	end;
 	-- import
@@ -739,10 +882,47 @@ function apply_templates(meta, styles, subs, templates)
 			end
 		end
 	end
+	-- style helper
+	tenv.styles = function(name)
+		local style = styles[name];
+		if style ~= nil then
+			return table.copy(style);
+		end
+		return nil;
+	end
+	-- loop helper
+	tenv.makeloop = function(receiver, ...)
+		return makeloop(tenv, receiver, { ... });
+	end
+	tenv.loopset = function(...)
+		loopset(tenv, { ... });
+		return "";
+	end
+	tenv.perframe = function(receiver)
+		local line = tenv.line;
+		local start_time, end_time = line.start_time, line.end_time;
+		local start_frame, end_frame = aegisub.frame_from_ms(start_time), aegisub.frame_from_ms(end_time);
+		if start_frame ~= nil or end_frame ~= nil then
+			makeloop(tenv, receiver, { "absframe", { start_frame, end_frame - 1 } });
+			line.start_time = aegisub.ms_from_frame(rev.absframe);
+			line.end_time = aegisub.ms_from_frame(rev.absframe + 1);
+			line.duration = line.end_time - line.start_time;
+			if type(receiver) == "string" then
+				local rev = tenv[receiver];
+				rev.frame = rev.absframe - start_frame;
+				rev.total = end_frame - start_frame;
+				rev.progress = rev.frame / rev.total;
+			end
+		else
+			aegisub.debug.out(2, "FPS is unknown, please load at least one video.\n", val);
+		end
+		return "";
+	end
 
 	-- run all run-once code snippets
 	for k, t in pairs(templates.once) do
 		assert(t.code, "WTF, a 'once' template without code?")
+		tenv.template = t
 		run_code_template(t, tenv)
 	end
 
@@ -809,8 +989,8 @@ function set_ctx_syl(varctx, line, syl)
 	elseif line.valign == "bottom" then
 		varctx.sy = varctx.sbottom
 	end
-  varctx.slen = syl.length
-  
+	varctx.slen = syl.length
+
 	varctx.left = varctx.sleft
 	varctx.center = varctx.scenter
 	varctx.right = varctx.sright
@@ -821,7 +1001,7 @@ function set_ctx_syl(varctx, line, syl)
 	varctx.height = varctx.sheight
 	varctx.x = varctx.sx
 	varctx.y = varctx.sy
-  varctx.len = varctx.slen
+	varctx.len = varctx.slen
 end
 
 -- splitting into word and char tables
@@ -879,7 +1059,7 @@ function additional_proc_line(line)
 			chars = {n=0},
 			kara = {n=0},
 			style = line.styleref,
-      		length = unicode.len(pre .. wordtxt .. post)
+			length = unicode.len(pre .. wordtxt .. post)
 		}
 
 		for i=1,#line.kara do
@@ -909,7 +1089,7 @@ function additional_proc_line(line)
 			word.end_time = word.kara[word.kara.n].end_time
 			word.duration = word.end_time-word.start_time
 			word.si = word.kara[1].i
-            word.inline_fx = word.kara[1].inline_fx
+			word.inline_fx = word.kara[1].inline_fx
 		end
 
 		lf = lf + word.prespacewidth + word.width + word.postspacewidth
@@ -955,7 +1135,7 @@ function additional_proc_line(line)
 			prespacewidth = 0,
 			postspacewidth = 0,
 			style = line.styleref,
-      length = unicode.len(c)
+			length = unicode.len(c)
 		}
 		for i=1,words.n do
 			if words[i].ci > ci then
@@ -997,7 +1177,7 @@ function additional_proc_line(line)
 			char.highlights = line.kara[#line.kara].highlights
 			--char.style = line.kara[i-1].style
 		end
-        char.inline_fx = char.syll.inline_fx
+		char.inline_fx = char.syll.inline_fx
 		if char == char.syll.chars[1] and lf ~= char.syll.left then
 			lf = char.syll.left
 			char.left = lf
@@ -1012,72 +1192,72 @@ function additional_proc_line(line)
 
 	line.chars = chars
 
-    local fchar
+	local fchar
 	local lf = 0
 	for fi,f in ipairs(line.furi) do
-        local ci = 0
-        for c in unicode.chars(f.text_stripped) do
-            ci = ci + 1
-            w = aegisub.text_extents(line.furistyle, c)
-            local tagstr = ""
-            for i,tag in ipairs(tags) do
-                if tag.ci == ci then
-                    tagstr = tagstr .. tag.text:gsub("\\[Kk][of]?%d+",""):gsub("{}","")
-                end
-            end
-            fchar = {
-                start_time = line.start_time,
-                end_time = line.end_time,
-                duration = line.duration,
-                tags = tagstr,
-                text = tagstr .. c,
-                text_stripped = c,
-                text_spacestripped = c,
-                prespace = "",
-                postspace = "",
-                width = w,
-                left = lf,
-                center = lf + w/2,
-                right = lf + w,
-                prespacewidth = 0,
-                postspacewidth = 0,
-                style = line.furistyle,
-                length = unicode.len(c)
-            }
-            --[[for i=1,words.n do
-                if words[i].ci > ci then
-                    char.word = words[i-1]
-                    char.wi = i-1
-                    words[i-1].chars.n = words[i-1].chars.n + 1
-                    words[i-1].chars[words[i-1].chars.n] = char
-                    break
-                end
-            end
-            if char.word == nil then
-                char.word = words[words.n]
-                char.wi = words.n
-                words[words.n].chars.n = words[words.n].chars.n + 1
-                words[words.n].chars[words[words.n].chars.n] = char
-            end]]--
-            fchar.syll = f
-            fchar.si = fi
-            fchar.start_time = f.start_time
-            fchar.end_time = f.end_time
-            fchar.duration = f.duration
-            fchar.highlights = f.highlights
+		local ci = 0
+		for c in unicode.chars(f.text_stripped) do
+			ci = ci + 1
+			w = aegisub.text_extents(line.furistyle, c)
+			local tagstr = ""
+			for i,tag in ipairs(tags) do
+				if tag.ci == ci then
+					tagstr = tagstr .. tag.text:gsub("\\[Kk][of]?%d+",""):gsub("{}","")
+				end
+			end
+			fchar = {
+				start_time = line.start_time,
+				end_time = line.end_time,
+				duration = line.duration,
+				tags = tagstr,
+				text = tagstr .. c,
+				text_stripped = c,
+				text_spacestripped = c,
+				prespace = "",
+				postspace = "",
+				width = w,
+				left = lf,
+				center = lf + w/2,
+				right = lf + w,
+				prespacewidth = 0,
+				postspacewidth = 0,
+				style = line.furistyle,
+				length = unicode.len(c)
+			}
+			--[[for i=1,words.n do
+				if words[i].ci > ci then
+					char.word = words[i-1]
+					char.wi = i-1
+					words[i-1].chars.n = words[i-1].chars.n + 1
+					words[i-1].chars[words[i-1].chars.n] = char
+					break
+				end
+			end
+			if char.word == nil then
+				char.word = words[words.n]
+				char.wi = words.n
+				words[words.n].chars.n = words[words.n].chars.n + 1
+				words[words.n].chars[words[words.n].chars.n] = char
+			end]]--
+			fchar.syll = f
+			fchar.si = fi
+			fchar.start_time = f.start_time
+			fchar.end_time = f.end_time
+			fchar.duration = f.duration
+			fchar.highlights = f.highlights
 
-            fchar.inline_fx = f.inline_fx
-            if ci == 1 then
-                lf = f.left
-                fchar.left = lf
-                fchar.center = lf + w/2
-                fchar.right = lf + w
-            end
-            lf = lf + w
+			fchar.inline_fx = f.inline_fx
+			if ci == 1 then
+				lf = f.left
+				fchar.left = lf
+				fchar.center = lf + w/2
+				fchar.right = lf + w
+			end
+			lf = lf + w
 
-            fchars.n = fchars.n+1
-            fchars[fchars.n] = fchar
-        end
+			fchars.n = fchars.n+1
+			fchars[fchars.n] = fchar
+		end
 	end
 	line.fchars = fchars
 end
@@ -1086,7 +1266,7 @@ function apply_line(meta, styles, subs, line, templates, tenv)
 	-- Tell whether any templates were applied to this line, needed to know whether the original line should be removed from input
 	local applied_templates = false
 
-  line.length = unicode.len(line.text_stripped)
+	line.length = unicode.len(line.text_stripped)
 
 	-- General variable replacement context
 	local varctx = {
@@ -1114,7 +1294,7 @@ function apply_line(meta, styles, subs, line, templates, tenv)
 		lheight = math.floor(line.height*10 + 0.5)/10,
 		lx = math.floor(line.x*10+0.5)/10,
 		ly = math.floor(line.y*10+0.5)/10,
-    llen = line.length
+		llen = line.length
 	}
 
 	tenv.orgline = line
@@ -1137,6 +1317,8 @@ function apply_line(meta, styles, subs, line, templates, tenv)
 	for t in matching_templates(templates.line, line, tenv) do
 		if aegisub.progress.is_cancelled() then break end
 
+		tenv.template = t
+
 		-- Set varctx for per-line variables
 		varctx["start"] = varctx.lstart
 		varctx["end"] = varctx.lend
@@ -1154,20 +1336,16 @@ function apply_line(meta, styles, subs, line, templates, tenv)
 		varctx.height = varctx.lheight
 		varctx.x = varctx.lx
 		varctx.y = varctx.ly
-    varctx.len = varctx.llen
+		varctx.len = varctx.llen
 
-		for j, maxj in template_loop(tenv, t.loops) do
-			if t.code then
-				aegisub.debug.out(5, "Code template, %s\n", t.code)
-				tenv.line = line
-				-- Although run_code_template also performs template looping this works
-				-- by "luck", since by the time the first loop of this outer loop completes
-				-- the one run by run_code_template has already performed all iterations
-				-- and has tenv.j and tenv.maxj in a loop-ending state, causing the outer
-				-- loop to only ever run once.
-				run_code_template(t, tenv)
-			else
-				aegisub.debug.out(5, "Line template, pre = '%s', t = '%s'\n", t.pre, t.t)
+		
+		if t.code then
+			aegisub.debug.out(5, "Code template, %s\n", t.code)
+			tenv.line = line
+			run_code_template(t, tenv)
+		else
+			aegisub.debug.out(5, "Line template, pre = '%s', t = '%s'\n", t.pre, t.t)
+			for j, maxj in template_loop(tenv, t.loops) do
 				applied_templates = true
 				local newline = table.copy(line)
 				tenv.line = newline
@@ -1338,6 +1516,10 @@ function run_code_template(template, tenv)
 	end
 end
 
+function is_primitive(type)
+	return type == "boolean" or type == "number" or type == "string"
+end
+
 function run_text_template(template, tenv, varctx)
 	local res = template
 	aegisub.debug.out(5, "Running text template '%s'\n", res)
@@ -1348,9 +1530,22 @@ function run_text_template(template, tenv, varctx)
 		local function var_replacer(varname)
 			varname = string.lower(varname)
 			aegisub.debug.out(5, "Found variable named '%s', ", varname)
-			if varctx[varname] ~= nil then
-				aegisub.debug.out(5, "it exists, value is '%s'\n", varctx[varname])
-				return varctx[varname]
+			local varvalue = varctx[varname]
+			if type(varvalue) == "function" then
+				local success, computed = pcall(varvalue, varctx)
+				if success then
+					varvalue = computed
+				else
+					aegisub.debug.out(2, "but failed to compute it: %s", computed)
+					return "$" .. varname
+				end
+			end
+			if varvalue ~= nil then
+				aegisub.debug.out(5, "it exists, value is '%s'\n", varvalue)
+				if not is_primitive(type(varvalue)) then
+					aegisub.debug.out(2, "Found non-primitive '%s' in template: %s\n", varvalue, template)
+				end
+				return tostring(varvalue)
 			else
 				aegisub.debug.out(5, "doesn't exist\n")
 				aegisub.debug.out(2, "Unknown variable name: %s\nIn karaoke template: %s\n\n", varname, template)
@@ -1371,7 +1566,10 @@ function run_text_template(template, tenv, varctx)
 			setfenv(f, tenv)
 			local res, val = pcall(f)
 			if res then
-				return val
+				if not is_primitive(type(val)) then
+					aegisub.debug.out(2, "Found non-primitive '%s' in template: %s\n", val, template)
+				end
+				return tostring(val)
 			else
 				aegisub.debug.out(2, "Runtime error in template expression: %s\nExpression producing error: %s\nTemplate with expression: %s\n\n", val, expression, template)
 				return "!" .. expression .. "!"
@@ -1393,6 +1591,7 @@ function apply_syllable_templates(syl, line, templates, tenv, varctx, subs)
 	for t in matching_templates(templates, line, tenv) do
 		if aegisub.progress.is_cancelled() then break end
 
+		tenv.template = t
 		tenv.syl = syl
 		tenv.basesyl = syl
 		set_ctx_syl(varctx, line, syl)
