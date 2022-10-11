@@ -12,11 +12,11 @@
 
 ### load_fx(effect)
 
-寻找第一个包含 `fx <effect>` 的模板行，为其创建执行函数 `run(extra)` 并返回。
+寻找第一个包含 `fx <effect>` 的模板行，为其创建解释器 `run(extra)` 并返回。
 
 通过此函数可以方便地复用模板行，使得模板行中可以插入其他模板行，以便于统一修改参数。
 
-此外支持通过内联变量自定义参数，将内联变量构成的表传入执行函数的 `extra` 参数即可。
+此外支持通过内联变量自定义参数，将内联变量构成的表传入解释器的 `extra` 参数即可。
 
 推荐只在需要多次使用自定义参数的场景下使用此函数，其他情况使用 `use_fx` 函数替代。
 
@@ -38,24 +38,22 @@ template line: !fade_tag_var({time=150})!{\pos(100,100)}
 
 ### use_fx(effect[, extra])
 
-寻找包含 `fx <effect>` 的模板行，并在当前作用域下执行模板。
+寻找包含 `fx <effect>` 的模板行，并在当前作用域下解释模板。
 
 无需指定自定义参数的情况下 `extra` 可省略。等效于带缓存的 `load_fx(effect)(extra)`。
 
 - 例子：复用文字与边界透明度配置，支持配置透明度
 ```
-template line fx c: {\1a$alpha1\3a$alpha3}
-template line: !use_fx("c",{alpha1="&HFF&",alpha3="&H00&"})!{\pos(100,100)}
+template line fx c: {\1a$alphaa\3a$alphac}
+template line: !use_fx("c",{alphaa="&HFF&",alphac="&H00&"})!{\pos(100,100)}
 [result]: {\1a&HFF&\3a&HFF&}{\pos(100,100)}
 ```
 
 ### t(str)
 
-为行内模板创建解释器。
+为行内模板创建解释器。解释器是一个函数，在调用时会解释模板并返回结果。
 
 行内模板与普通模板行类似，但 `$` 被替换为 `@`，`!` 被替换为 <code>&#96;</code>。 
-
-返回一个与 `load_fx` 返回值类似的函数。
 
 - 例子：定义行内模板以便复用
 ```
