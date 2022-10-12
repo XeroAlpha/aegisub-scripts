@@ -434,14 +434,16 @@ function makeloop(tenv, receiver, args)
 	local argn = #args;
 	local template = tenv.template;
 	local loop_data, loop_state;
-	if type(template.loop_data) == "table" then
-		loop_data = template.loop_data
+	local loop_target = template.isline and tenv.orgline or tenv.basesyl;
+	local loop_data_key = string.format("_loop_data_%s", loop_target);
+	if type(template[loop_data_key]) == "table" then
+		loop_data = template[loop_data_key]
 	else
 		loop_data = {
 			maxj = tenv.maxj,
 			vars = {}
 		};
-		template.loop_data = loop_data;
+		template[loop_data_key] = loop_data;
 	end
 	if type(receiver) == "string" then
 		loop_state = tenv[receiver];
@@ -458,7 +460,7 @@ function makeloop(tenv, receiver, args)
 		loop_state = {};
 	end
 	if loop_data.maxj ~= tenv.maxj then
-		aegisub.debug.out(2, "Do not use both makeloop(...) and loopctl/maxloop.\n");
+		aegisub.debug.out(2, "Do not use both makeloop(...) and loopctl/maxloop. maxj should be %s instead of %s.\n", loop_data.maxj, tenv.maxj);
 		tenv.maxj = loop_data.maxj;
 	end
 	for i = 2, argn, 2 do
@@ -834,7 +836,7 @@ function apply_templates(meta, styles, subs, templates)
 		local f_tag = tag;
 		t1 = t1 or 0;
 		t2 = t2 or line.duration;
-		step = step or (aegisub.ms_from_frame(101) - aegisub.ms_from_frame(1)) / 100;
+		step = step or (aegisub.ms_from_frame(101) - aegisub.ms_from_frame(1)) / 200;
 		if type(tag) == "string" then
 			local parsed = tenv.t(tag);
 			f_tag = function(p, t)
