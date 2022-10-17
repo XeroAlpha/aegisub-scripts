@@ -325,6 +325,28 @@ function template_loop(tenv, initmaxj)
 	return itor
 end
 
+function text_template_interpreter(meta, ...)
+	local args = table.pack(...);
+	if args.n == 0 then
+		return run_text_template(meta.text, meta.tenv, meta.tenv.varctx);
+	else
+		local new_varctx = {};
+		if meta.params ~= nil then
+			for i, k in ipairs(meta.params) do
+				new_varctx[k] = args[i];
+			end
+		else
+			local extra = args[1];
+			if extra ~= nil then
+				for k, v in pairs(extra) do
+					new_varctx[k] = v;
+				end
+			end
+		end
+		setmetatable(new_varctx, { __index = meta.tenv.varctx });
+		return run_text_template(meta.text, meta.tenv, new_varctx);
+	end
+end
 function use_tag(source, id, index)
 	for tags in string.gmatch(source.text, "{[^}]+}") do
 		local match = string.match(tags, "\\" .. id .. "([^\\}]+)")
@@ -411,7 +433,7 @@ function transform(t1, t2, step, tag, easing)
 	f = function(t)
 		return tag(g(t), t, t1, t2);
 	end
-	local t, t_old, ratio, accel, g_old = t1, t1, 0.5, 1.0, 1.0;
+	local t, t_old, ratio, accel, g_delta, g_old = t1, t1, 0.5, 1.0, 0.0, 1.0;
 	if t1 == 0 then
 		table.insert(ret, f(t1));
 	else
@@ -421,35 +443,44 @@ function transform(t1, t2, step, tag, easing)
 		t_old = t;
 		t = math.min(t + step, t2);
 		g_old = g(t_old);
-		ratio = (g((t + t_old) / 2) - g_old) / (g(t) - g_old);
-		if ratio > 0.99999 then ratio = 0.99999 end
-		if ratio < 0.00001 then ratio = 0.00001 end
-		accel = math.log(ratio) / math.log(0.5);
-		accel = math.floor(accel * 1000) / 1000;
-		table.insert(ret, string.format("\\t(%d,%d,%s,%s)", t_old, t, accel, f(t)));
+		g_delta = g(t) - g_old;
+		if g_delta ~= 0 then
+			ratio = (g((t + t_old) / 2) - g_old) / g_delta;
+			if ratio > 0.99999 then ratio = 0.99999 end
+			if ratio < 0.00001 then ratio = 0.00001 end
+			accel = math.log(ratio) / math.log(0.5);
+			accel = math.floor(accel * 1000) / 1000;
+			table.insert(ret, string.format("\\t(%d,%d,%s,%s)", t_old, t, accel, f(t)));
+		end
 	end
 	return table.concat(ret);
 end
-function makeloop(tenv, receiver, args)
-	local argn = #args;
+function get_loop_ctx(tenv)
 	local template = tenv.template;
-	local loop_data, loop_state;
+	local loop_ctx;
 	local loop_target = template.isline and tenv.orgline or tenv.basesyl;
-	local loop_data_key = string.format("_loop_data_%s", loop_target);
-	if type(template[loop_data_key]) == "table" then
-		loop_data = template[loop_data_key]
+	local loop_ctx_key = string.format("_loop_ctx_%s", loop_target);
+	if type(template[loop_ctx_key]) == "table" then
+		loop_ctx = template[loop_ctx_key];
 	else
-		loop_data = {
+		loop_ctx = {
 			maxj = tenv.maxj,
 			vars = {}
 		};
-		template[loop_data_key] = loop_data;
+		template[loop_ctx_key] = loop_ctx;
 	end
+	return loop_ctx;
+end
+function makeloop(tenv, namespace, receiver, args)
+	local argn = #args;
+	local loop_ctx = get_loop_ctx(tenv);
+	local loop_state, loop_vars;
 	if type(receiver) == "string" then
 		loop_state = tenv[receiver];
 		if loop_state ~= nil then
 			if type(loop_state) ~= "table" then
 				loop_state = {};
+				tenv[receiver] = loop_state;
 				aegisub.debug.out(2, "Trying to use a non-table as loop state receiver.\n");
 			end
 		else
@@ -459,13 +490,18 @@ function makeloop(tenv, receiver, args)
 	else
 		loop_state = {};
 	end
-	if loop_data.maxj ~= tenv.maxj then
-		aegisub.debug.out(2, "Do not use both makeloop(...) and loopctl/maxloop. maxj should be %s instead of %s.\n", loop_data.maxj, tenv.maxj);
-		tenv.maxj = loop_data.maxj;
+	loop_vars = loop_ctx.vars[namespace];
+	if loop_vars == nil then
+	    loop_vars = {};
+	    loop_ctx.vars[namespace] = loop_vars;
+	end
+	if loop_ctx.maxj ~= tenv.maxj then
+		aegisub.debug.out(2, "Do not use both makeloop(...) and loopctl/maxloop. maxj should be %s instead of %s.\n", loop_ctx.maxj, tenv.maxj);
+		tenv.maxj = loop_ctx.maxj;
 	end
 	for i = 2, argn, 2 do
 		local name, range = args[i - 1], args[i];
-		local data = loop_data.vars[name];
+		local data = loop_vars[name];
 		-- { j_divider, j_modder, factor, offset }
 		if data ~= nil then
 			loop_state[name] = math.floor((tenv.j - 1) / data[1]) % data[2] * data[3] + data[4];
@@ -484,10 +520,10 @@ function makeloop(tenv, receiver, args)
 					end
 				end
 				if data ~= nil then
-					loop_data.vars[name] = data;
+					loop_vars[name] = data;
 					loop_state[name] = data[4];
 					tenv.maxj = tenv.maxj * data[2];
-					loop_data.maxj = tenv.maxj;
+					loop_ctx.maxj = tenv.maxj;
 				else
 					aegisub.debug.out(2, "Illegal loop variable range: %s\n", range);
 				end
@@ -501,14 +537,45 @@ function makeloop(tenv, receiver, args)
 	end
 	return "";
 end
-function loopset(tenv, args)
-	local template = tenv.template;
+function loopget(tenv, namespace, varname, query)
+	local loop_ctx = get_loop_ctx(tenv, namespace);
+	local loop_vars = loop_ctx.vars[namespace];
+	-- { j_divider, j_modder, factor, offset }
+	if loop_vars ~= nil and loop_vars[varname] ~= nil then
+	    local data = loop_vars[varname];
+		if query == "step_count" then
+			return data[2];
+		end
+		if query == "step" then
+			return data[3];
+		end
+		if query == "initial" then
+			return data[4];
+		end
+		if query == "range" then
+			return data[3] * (data[2] - 1);
+		end
+		if query == "final" then
+			return data[4] + data[3] * (data[2] - 1);
+		end
+		if query == "index" then
+			return math.floor((tenv.j - 1) / data[1]) % data[2] + 1;
+		end
+		if query == "progress" then
+			return math.floor((tenv.j - 1) / data[1]) / data[2] % 1;
+		end
+		return math.floor((tenv.j - 1) / data[1]) % data[2] * data[3] + data[4];
+	end
+	return nil;
+end
+function loopset(tenv, namespace, args)
 	local argn = #args;
-	local loop_data = template.loop_data;
-	if loop_data ~= nil then
+	local loop_ctx = get_loop_ctx(tenv, namespace);
+	local loop_vars = loop_ctx.vars[namespace];
+	if loop_vars ~= nil then
 		for i = 2, argn, 2 do
 			local name, value = args[i - 1], args[i];
-			local data = loop_data.vars[name];
+			local data = loop_vars[name];
 			-- { j_divider, j_modder, factor, offset }
 			if data ~= nil then
 				local oldindex = math.floor((tenv.j - 1) / data[1]) % data[2];
@@ -720,7 +787,7 @@ function apply_templates(meta, styles, subs, templates)
 		return false_value
 	end
 	-- load fx line as function
-	tenv.load_fx = function(effect)
+	tenv.load_fx = function(effect, ...)
 		local text = "";
 		for i, line in ipairs(subs) do
 			if line.class == "dialogue" and line.comment and line.effect:match("fx " .. effect) then
@@ -728,19 +795,15 @@ function apply_templates(meta, styles, subs, templates)
 				break;
 			end
 		end
-		return function(extra)
-			local new_varctx;
-			if extra ~= nil then
-				new_varctx = {};
-				for k, v in pairs(extra) do
-					new_varctx[k] = v;
-				end
-				setmetatable(new_varctx, { __index = tenv.varctx });
-			else
-				new_varctx = tenv.varctx;
-			end
-			return run_text_template(text, tenv, new_varctx);
+		local ret = {
+			text = text,
+			tenv = tenv
+		};
+		if select("#", ...) > 0 then
+			ret.params = table.pack(...);
 		end
+		setmetatable(ret, { __call = text_template_interpreter });
+		return ret;
 	end
 	-- apply fx line
 	tenv.use_fx_cache = {};
@@ -753,23 +816,19 @@ function apply_templates(meta, styles, subs, templates)
 		return eff(extra);
 	end
 	-- text template
-	tenv.t = function(text, no_escape)
-		if not no_escape then
-			text = text:gsub("@", "$"):gsub("`", "!");
+	tenv.create_template = function(text, ...)
+		local ret = {
+			text = text,
+			tenv = tenv
+		};
+		if select("#", ...) > 0 then
+			ret.params = table.pack(...);
 		end
-		return function(extra)
-			local new_varctx;
-			if extra ~= nil then
-				new_varctx = {};
-				for k, v in pairs(extra) do
-					new_varctx[k] = v;
-				end
-				setmetatable(new_varctx, { __index = tenv.varctx });
-			else
-				new_varctx = tenv.varctx;
-			end
-			return run_text_template(text, tenv, new_varctx);
-		end
+		setmetatable(ret, { __call = text_template_interpreter });
+		return ret;
+	end
+	tenv.t = function(text, ...)
+		return tenv.create_template(text:gsub("@", "$"):gsub("`", "!"), ...);
 	end
 	-- extract tag data from source (line or syl) supported custom tags
 	tenv.use_tag = use_tag;
@@ -819,10 +878,11 @@ function apply_templates(meta, styles, subs, templates)
 	-- variable define
 	tenv.varctx = nil;
 	tenv.varctx_base = {};
-	tenv.define = function(name, value, var_type)
+	tenv.define = function(name, value, var_type, ...)
 		if var_type == "template" then
-			tenv.varctx_base[name] = function(varctx)
-				return run_text_template(value, tenv, varctx);
+			local template = tenv.create_template(value, ...);
+			tenv.varctx_base[name] = function()
+				return template();
 			end
 		elseif var_type == "computed" and type(value) == "function" then
 			tenv.varctx_base[name] = value;
@@ -838,9 +898,10 @@ function apply_templates(meta, styles, subs, templates)
 		t2 = t2 or line.duration;
 		step = step or (aegisub.ms_from_frame(101) - aegisub.ms_from_frame(1)) / 200;
 		if type(tag) == "string" then
-			local parsed = tenv.t(tag);
-			f_tag = function(p, t)
-				return parsed({ p = string.format("%f", p), t = t, tstart = t1, tend = t2 });
+			f_tag = tenv.t(tag, "p", "t", "tstart", "tend");
+		elseif type(tag) == "table" then
+			if tag.params == nil then
+				tag.params = { "p", "t", "tstart", "tend" };
 			end
 		end
 		return transform(t1, t2, step, f_tag, easing);
@@ -850,13 +911,12 @@ function apply_templates(meta, styles, subs, templates)
 	tenv.random = math.random;
 	-- debug out
 	tenv.log = function(...)
-		local args = { ... };
-		local argn = #args;
-		if argn <= 1 then
-			aegisub.log("%s", args[1]);
+		if select("#", ...) <= 1 then
+			aegisub.log("%s", select(1, ...));
 		else
-			aegisub.log(table.unpack(args));
+			aegisub.log(...);
 		end
+		return "";
 	end;
 	-- import
 	tenv.import = function(name, alias)
@@ -894,10 +954,16 @@ function apply_templates(meta, styles, subs, templates)
 	end
 	-- loop helper
 	tenv.makeloop = function(receiver, ...)
-		return makeloop(tenv, receiver, { ... });
+		if select("#", ...) % 2 == 0 then
+			return makeloop(tenv, "", receiver, table.pack(...));
+		end
+		return makeloop(tenv, "", nil, table.pack(receiver, ...));
+	end
+	tenv.loopget = function(varname, query)
+		return loopget(tenv, "", varname, query);
 	end
 	tenv.loopset = function(...)
-		loopset(tenv, { ... });
+		loopset(tenv, "", table.pack(...));
 		return "";
 	end
 	tenv.perframe = function(receiver)
@@ -905,15 +971,16 @@ function apply_templates(meta, styles, subs, templates)
 		local start_time, end_time = line.start_time, line.end_time;
 		local start_frame, end_frame = aegisub.frame_from_ms(start_time), aegisub.frame_from_ms(end_time);
 		if start_frame ~= nil or end_frame ~= nil then
-			makeloop(tenv, receiver, { "absframe", { start_frame, end_frame - 1 } });
-			line.start_time = aegisub.ms_from_frame(rev.absframe);
-			line.end_time = aegisub.ms_from_frame(rev.absframe + 1);
+			makeloop(tenv, "perframe", nil, { "absframe", { start_frame, end_frame - 1 } });
+			local absframe = loopget(tenv, "perframe", "absframe");
+			line.start_time = aegisub.ms_from_frame(absframe);
+			line.end_time = aegisub.ms_from_frame(absframe + 1);
 			line.duration = line.end_time - line.start_time;
 			if type(receiver) == "string" then
 				local rev = tenv[receiver];
-				rev.frame = rev.absframe - start_frame;
+				rev.frame = absframe - start_frame;
 				rev.total = end_frame - start_frame;
-				rev.progress = rev.frame / rev.total;
+				rev.progress = (absframe - start_frame) / (end_frame - start_frame);
 			end
 		else
 			aegisub.debug.out(2, "FPS is unknown, please load at least one video.\n", val);
@@ -1534,7 +1601,7 @@ function run_text_template(template, tenv, varctx)
 			aegisub.debug.out(5, "Found variable named '%s', ", varname)
 			local varvalue = varctx[varname]
 			if type(varvalue) == "function" then
-				local success, computed = pcall(varvalue, varctx)
+				local success, computed = pcall(varvalue)
 				if success then
 					varvalue = computed
 				else
