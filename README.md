@@ -104,15 +104,21 @@ template line: {\1c!u.color()!\fad(100,100)}
 [result]: {\1c&H00FF00&\fad(100,100)}Test line 2
 ```
 
-### locate(ox, oy, x, y, align)
+### locate(ox, oy, x, y, align, matrix)
 
-将 `ox,oy` 指定的坐标转换到由 `x,y,align` 指定的坐标系，返回逗号分隔的坐标字符串。
+将 `ox,oy` 指定的坐标转换到由 `x,y,align` 指定的坐标系，并通过 `matrix` 指定的矩阵进行变换，最后返回逗号分隔的坐标字符串。
 
-所有参数均可省略。`ox,oy` 默认为原中心点，`x,y` 默认为通过 `pos` 标签指定的坐标，`align` 默认为 `an` 标签指定的对齐方式或样式指定的对齐方式。
+所有参数均可省略。`ox,oy` 默认为原中心点，`x,y` 默认为通过 `pos` 标签指定的坐标，`align` 默认为 `an` 标签指定的对齐方式或样式指定的对齐方式，`matrix` 默认为单位矩阵。
 
-变体 `locate_c(ox, oy, x, y, align)` 返回 `x, y` 两个值。
+`matrix` 应当是一个 4x4 的矩阵，或者是 `Yutils.math.create_matrix()` 的返回值。
 
-变体 `locate_s(ox, oy, x, y, align)` 返回空格分隔的坐标字符串。
+变体 `locate_c(ox, oy, x, y, align, matrix)` 返回 `x, y` 两个值。
+
+变体 `locate_x(ox, x, align, matrix)` 只返回 `x`。
+
+变体 `locate_y(oy, y, align, matrix)` 只返回 `y`。
+
+变体 `locate_s(ox, oy, x, y, align, matrix)` 返回空格分隔的坐标字符串。
 
 - 例子：逐字模板位置设定
 ```
@@ -203,6 +209,8 @@ code once: import("os"); math.randomseed(os.time());
 输出日志。`_G.aegisub.log` 和 `_G.aegisub.debug.out` 的别名。
 
 当仅传入一个参数时会将此参数转为字符串输出。
+
+与 `_G.aegisub.log` 不同，此函数总是返回空字符串（`""`）。
 
 - 例子：向日志输出分辨率大小
 ```

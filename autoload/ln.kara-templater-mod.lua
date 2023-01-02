@@ -325,6 +325,11 @@ function template_loop(tenv, initmaxj)
 	return itor
 end
 
+context_id = 0;
+function allocate_context_id()
+	context_id = context_id + 1;
+	return context_id;
+end
 function text_template_interpreter(meta, ...)
 	local args = table.pack(...);
 	if args.n == 0 then
@@ -406,9 +411,12 @@ function locate(line, syl, ox, oy, x, y, align, matrix)
 		yoffset = yoffset + line.height / 2;
 	end
 	if matrix ~= nil then
+		if type(matrix.get_data) == "function" then
+			matrix = matrix.get_data();
+		end
 		local z, w = 0, 1;
-		xoffset = xoffset * matrix[1] + yoffset * matrix[5] + z * matrix[9] + w * matrix[13];
-		yoffset = xoffset * matrix[2] + yoffset * matrix[6] + z * matrix[10] + w * matrix[14];
+		xoffset, yoffset = xoffset * matrix[1] + yoffset * matrix[5] + z * matrix[9] + w * matrix[13],
+						   xoffset * matrix[2] + yoffset * matrix[6] + z * matrix[10] + w * matrix[14];
 	end
 	x = x + xoffset;
 	y = y + yoffset;
@@ -459,7 +467,12 @@ function get_loop_ctx(tenv)
 	local template = tenv.template;
 	local loop_ctx;
 	local loop_target = template.isline and tenv.orgline or tenv.basesyl;
-	local loop_ctx_key = string.format("_loop_ctx_%s", loop_target);
+	local loop_target_id = loop_target._loop_target_id;
+	if loop_target_id == nil then
+		loop_target_id = allocate_context_id();
+		loop_target._loop_target_id = loop_target_id;
+	end
+	local loop_ctx_key = string.format("_loop_ctx_%x", loop_target_id);
 	if type(template[loop_ctx_key]) == "table" then
 		loop_ctx = template[loop_ctx_key];
 	else
@@ -538,7 +551,7 @@ function makeloop(tenv, namespace, receiver, args)
 	return "";
 end
 function loopget(tenv, namespace, varname, query)
-	local loop_ctx = get_loop_ctx(tenv, namespace);
+	local loop_ctx = get_loop_ctx(tenv);
 	local loop_vars = loop_ctx.vars[namespace];
 	-- { j_divider, j_modder, factor, offset }
 	if loop_vars ~= nil and loop_vars[varname] ~= nil then
@@ -570,7 +583,7 @@ function loopget(tenv, namespace, varname, query)
 end
 function loopset(tenv, namespace, args)
 	local argn = #args;
-	local loop_ctx = get_loop_ctx(tenv, namespace);
+	local loop_ctx = get_loop_ctx(tenv);
 	local loop_vars = loop_ctx.vars[namespace];
 	if loop_vars ~= nil then
 		for i = 2, argn, 2 do
@@ -866,6 +879,14 @@ function apply_templates(meta, styles, subs, templates)
 			align or tenv.use_tag(line, "an"),
 			matrix
 		);
+	end
+	tenv.locate_x = function(ox, x, align, matrix)
+		local rx, _ = tenv.locate_c(ox, nil, x, nil, align, matrix);
+		return rx;
+	end
+	tenv.locate_y = function(oy, y, align, matrix)
+		local _, ry = tenv.locate_c(nil, oy, nil, y, align, matrix);
+		return ry;
 	end
 	tenv.locate = function(ox, oy, x, y, align, matrix)
 		local rx, ry = tenv.locate_c(ox, oy, x, y, align, matrix);
